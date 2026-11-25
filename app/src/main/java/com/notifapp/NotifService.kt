@@ -4,7 +4,10 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.ComponentName
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.content.Intent
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
@@ -20,7 +23,7 @@ import java.util.Locale
 object Cfg {
     // Tanda * di akhir = cocok semua package berawalan itu. Package tambahan (pref "pkgsx") diisi dari app.
     const val DEFAULT_PKGS =
-        "com.whatsapp,com.whatsapp.w4b,com.gojek*,com.shopee.id,com.shopeepay.id*,id.dana*"
+        "com.whatsapp,com.whatsapp.w4b,com.gojek*,com.gopay*,com.shopee*,com.shopeepay*,id.dana*,com.dana*"
     const val CHANNEL = "pay"
     private val lock = Any()
 
@@ -29,6 +32,36 @@ object Cfg {
     fun pkgs(c: Context): List<String> =
         (DEFAULT_PKGS + "," + (prefs(c).getString("pkgsx", "") ?: ""))
             .split(",").map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+
+    // Mode luas (bawaan aktif): package yang belum dikenal tetap dipantau kalau notifikasinya jelas
+    // berupa pembayaran masuk (bukan pesan chat). Package tersebut otomatis dicatat ke daftar.
+    fun wide(c: Context) = prefs(c).getBoolean("wide", true)
+
+    // Aplikasi chat/pesan tidak pernah dipantau lewat mode luas
+    fun isChatPkg(pkg: String) = pkg.startsWith("com.whatsapp") || pkg.startsWith("org.telegram") ||
+        pkg.startsWith("com.google.android.apps.messaging") || pkg.startsWith("com.android.mms") ||
+        pkg.startsWith("com.facebook") || pkg.startsWith("com.instagram") || pkg == "jp.naver.line.android"
+
+    // Paksa Android menyambung ulang listener (dipakai kalau izin aktif tapi listener tidak tersambung)
+    fun rebind(c: Context) {
+        try {
+            val cn = ComponentName(c, NotifService::class.java)
+            val pm = c.packageManager
+            pm.setComponentEnabledSetting(cn, PackageManager.COMPONENT_ENABLED_STATE_DISABLED, PackageManager.DONT_KILL_APP)
+            pm.setComponentEnabledSetting(cn, PackageManager.COMPONENT_ENABLED_STATE_ENABLED, PackageManager.DONT_KILL_APP)
+            if (Build.VERSION.SDK_INT >= 24) NotificationListenerService.requestRebind(cn)
+        } catch (_: Exception) {}
+    }
+
+    // Alamat webhook: kalau pengguna hanya mengisi alamat server, tambahkan /notif
+    fun hookUrl(raw: String): String {
+        val u = raw.trim()
+        if (u.isEmpty()) return u
+        val noQuery = u.substringBefore("?")
+        val afterScheme = noQuery.substringAfter("://", noQuery)
+        val path = if (afterScheme.contains("/")) afterScheme.substringAfter("/") else ""
+        return if (path.isEmpty()) noQuery.trimEnd('/') + "/notif" else u
+    }
 
     fun monitored(c: Context, pkg: String): Boolean =
         pkgs(c).any { if (it.endsWith("*")) pkg.startsWith(it.dropLast(1)) else pkg == it }
@@ -64,17 +97,22 @@ object Cfg {
 }
 
 // Pola notifikasi pembayaran masuk yang dikenal (ShopeePay, GoPay Merchant, DANA Bisnis)
-val PAY_HINT = Regex("(?i)pembayaran sebesar\\s*rp|pembayaran qris[a-z ]*diterima|diterima dana bisnis")
+val PAY_HINT = Regex(
+    "(?i)pembayaran sebesar\\s*rp|pembayaran\\s+(qris\\s+)?[a-z ]*diterima|pembayaran\\s+masuk|diterima\\s+dana\\s+bisnis|" +
+        "saldo\\s+masuk|uang\\s+masuk|menerima\\s+pembayaran|kamu\\s+menerima|dana\\s+masuk|qris[a-z ]*diterima"
+)
 
 // dana | shopeepay | gopay (null kalau tidak dikenali). Dipakai server untuk mencocokkan order per metode.
 fun detectMethod(pkg: String, title: String, text: String): String? {
     val s = "$title $text"
     return when {
         pkg.startsWith("com.shopee") -> "shopeepay"
-        pkg.startsWith("com.gojek") -> "gopay"
-        pkg.startsWith("id.dana") -> "dana"
+        pkg.startsWith("com.gojek") || pkg.startsWith("com.gopay") -> "gopay"
+        pkg.startsWith("id.dana") || pkg.startsWith("com.dana") -> "dana"
         s.contains("DANA", true) -> "dana"
-        s.contains("QRIS statis", true) -> "gopay"
+        s.contains("ShopeePay", true) || s.contains("Shopee", true) -> "shopeepay"
+        s.contains("GoPay", true) || s.contains("Gojek", true) -> "gopay"
+        s.contains("QRIS statis", true) || s.contains("QRIS dinamis", true) -> "gopay"
         s.contains("Pembayaran sebesar", true) -> "shopeepay"
         else -> null
     }
@@ -92,10 +130,16 @@ fun rupiah(n: Long) = "Rp " + String.format("%,d", n).replace(',', '.')
 // Hanya notifikasi PEMBAYARAN MASUK. Notif "kamu barusan bayar" (keluar) diabaikan.
 fun parseAmount(title: String, text: String): Long? {
     val s = "$title $text"
-    if (!Regex("(?i)diterima|masuk").containsMatchIn(s)) return null
+    if (!Regex("(?i)diterima|masuk|menerima").containsMatchIn(s)) return null
     if (Regex("(?i)barusan bayar|berhasil bayar").containsMatchIn(s)) return null
-    val m = Regex("(?i)Rp\\s?([0-9][0-9.]*)(?:,[0-9]{1,2})?").find(s) ?: return null
-    return m.groupValues[1].replace(".", "").toLongOrNull()
+    // Ambil nominal Rp pertama yang bukan "saldo ..." (supaya sisa saldo tidak terbaca sebagai pembayaran)
+    for (m in Regex("(?i)Rp\\.?\\s?([0-9][0-9.]*)(?:,[0-9]{1,2})?").findAll(s)) {
+        val before = s.substring(maxOf(0, m.range.first - 14), m.range.first)
+        if (Regex("(?i)saldo|bonus|cashback|poin").containsMatchIn(before)) continue
+        val v = m.groupValues[1].trimEnd('.').replace(".", "").toLongOrNull() ?: continue
+        if (v > 0) return v
+    }
+    return null
 }
 
 // Package Shopee juga mengirim notifikasi non-pembayaran, jadi wajib cocok pola ShopeePay.
@@ -106,7 +150,20 @@ fun isPayment(pkg: String, title: String, text: String): Boolean {
 }
 
 class NotifService : NotificationListenerService() {
+    companion object {
+        @Volatile var connected = false
+    }
+
     private val seen = HashMap<String, Long>()
+
+    override fun onListenerConnected() { connected = true }
+
+    override fun onListenerDisconnected() {
+        connected = false
+        if (Build.VERSION.SDK_INT >= 24) {
+            try { NotificationListenerService.requestRebind(ComponentName(this, NotifService::class.java)) } catch (_: Exception) {}
+        }
+    }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         val pkg = sbn.packageName
@@ -139,7 +196,15 @@ class NotifService : NotificationListenerService() {
         val time = SimpleDateFormat("dd/MM HH:mm:ss", Locale.getDefault()).format(Date(now))
         val entry = JSONObject().put("i", now).put("t", time).put("p", pkg).put("ti", title).put("tx", text)
 
-        if (!Cfg.monitored(this, pkg)) {
+        // Mode luas: package belum dikenal tetapi jelas pembayaran masuk -> ikut dipantau dan diingat
+        var watched = Cfg.monitored(this, pkg)
+        if (!watched && !isMsg && Cfg.wide(this) && !Cfg.isChatPkg(pkg) &&
+            PAY_HINT.containsMatchIn("$title $text") && parseAmount(title, text) != null) {
+            Cfg.addPackage(this, pkg)
+            watched = true
+        }
+
+        if (!watched) {
             // Package belum dipantau: hanya dicatat sebagai petunjuk kalau mirip notifikasi pembayaran,
             // TIDAK dikirim ke server. Pengguna memilih sendiri "Pantau package ini" di app.
             val amt = parseAmount(title, text)
@@ -168,7 +233,7 @@ class NotifService : NotificationListenerService() {
     private fun sendWebhook(id: Long, amount: Long, method: String, pkg: String, title: String, text: String) {
         val ctx = applicationContext
         val p = Cfg.prefs(this)
-        val url = p.getString("wh", "") ?: ""
+        val url = Cfg.hookUrl(p.getString("wh", "") ?: "")
         val secret = p.getString("sec", "") ?: ""
         val body = JSONObject().put("amount", amount).put("method", method).put("source", pkg)
             .put("title", title).put("text", text).put("ts", id).toString()
@@ -199,10 +264,14 @@ class NotifService : NotificationListenerService() {
                         break
                     }
                     c.disconnect()
-                    info = "HTTP $code"
+                    info = when (code) {
+                        401 -> "Secret salah (HTTP 401)"
+                        404 -> "URL webhook salah (HTTP 404)"
+                        else -> "HTTP $code"
+                    }
                     if (code in 400..499) break
                 } catch (e: Exception) {
-                    info = e.javaClass.simpleName
+                    info = "Server tidak terjangkau (${e.javaClass.simpleName})"
                 }
                 try { Thread.sleep(3000L * i) } catch (_: Exception) {}
             }
