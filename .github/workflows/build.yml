@@ -1,7 +1,9 @@
-name: Build APK
+name: Build Emy Cash APK
 on:
   push:
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -13,11 +15,35 @@ jobs:
           java-version: 17
       - name: Accept SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+      - name: Keystore tetap (opsional)
+        env:
+          KS: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS" ]; then
+            echo "$KS" | base64 -d > "$RUNNER_TEMP/emycash.jks"
+            echo "KEYSTORE_FILE=$RUNNER_TEMP/emycash.jks" >> "$GITHUB_ENV"
+          else
+            echo "Secret KEYSTORE_B64 kosong: APK ditandatangani kunci debug (pembaruan di atas versi lama bisa gagal)."
+          fi
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
-      - run: gradle assembleDebug --no-daemon
+      - run: gradle assembleRelease --no-daemon
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+      - name: Siapkan EmyCash.apk
+        run: cp app/build/outputs/apk/release/*.apk EmyCash.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: NotifApp-debug
-          path: app/build/outputs/apk/debug/*.apk
+          name: EmyCash
+          path: EmyCash.apk
+      # Tautan tetap: https://github.com/<akun>/<repo>/releases/latest/download/EmyCash.apk
+      - name: Terbitkan rilis "latest"
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest EmyCash.apk --title "Emy Cash (terbaru)" --notes "APK Emy Cash dari commit ${GITHUB_SHA::7}." --target "$GITHUB_SHA" --latest
