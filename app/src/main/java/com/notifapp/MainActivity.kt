@@ -5,7 +5,6 @@ import android.content.Intent
 import android.os.Bundle
 import android.provider.Settings
 import android.text.InputType
-import android.view.View
 import android.widget.*
 import org.json.JSONArray
 
@@ -19,22 +18,30 @@ class MainActivity : Activity() {
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, pad, pad, pad) }
 
         fun btn(t: String, f: () -> Unit) = Button(this).apply { text = t; setOnClickListener { f() } }
-        fun edit(h: String, k: String, pw: Boolean = false) = EditText(this).apply {
-            hint = h; setText(p.getString(k, ""))
+        fun edit(h: String, k: String, def: String = "", pw: Boolean = false) = EditText(this).apply {
+            hint = h; setText(p.getString(k, def))
             if (pw) inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             setSingleLine()
         }
 
-        val tok = edit("Telegram bot token (opsional)", "tok", true)
+        val tok = edit("Telegram bot token (opsional)", "tok", pw = true)
         val chat = edit("Telegram chat ID (opsional)", "chat")
+        val wh = edit("Webhook URL, mis. http://127.0.0.1:3000/notif", "wh")
+        val sec = edit("Webhook secret", "sec", pw = true)
+        val pk = edit("Package dipantau (pisah koma)", "pkgs", Cfg.DEFAULT_PKGS)
         hist = TextView(this)
 
         root.addView(btn("Buka Notification Access") {
             startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
         })
-        root.addView(tok); root.addView(chat)
+        listOf(tok, chat, wh, sec, pk).forEach { root.addView(it) }
         root.addView(btn("Simpan") {
-            p.edit().putString("tok", tok.text.toString().trim()).putString("chat", chat.text.toString().trim()).apply()
+            p.edit().putString("tok", tok.text.toString().trim())
+                .putString("chat", chat.text.toString().trim())
+                .putString("wh", wh.text.toString().trim())
+                .putString("sec", sec.text.toString().trim())
+                .putString("pkgs", pk.text.toString().trim().ifEmpty { Cfg.DEFAULT_PKGS })
+                .apply()
             Toast.makeText(this, "Tersimpan", Toast.LENGTH_SHORT).show()
         })
         root.addView(btn("Refresh riwayat") { render() })
@@ -51,7 +58,8 @@ class MainActivity : Activity() {
         val sb = StringBuilder()
         for (i in 0 until arr.length()) {
             val o = arr.getJSONObject(i)
-            sb.append("${o.getString("t")} • ${o.getString("a")}\n${o.getString("ti")}\n${o.getString("tx")}\n\n")
+            val src = o.optString("p", o.optString("a", "?"))
+            sb.append("${o.getString("t")} • $src\n${o.getString("ti")}\n${o.getString("tx")}\n\n")
         }
         hist.text = if (sb.isEmpty()) "Belum ada notifikasi." else sb.toString()
     }
