@@ -1,12 +1,20 @@
 package com.notifapp
 
+import android.Manifest
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.text.InputType
 import android.util.TypedValue
@@ -17,12 +25,14 @@ import android.widget.*
 import org.json.JSONArray
 
 class MainActivity : Activity() {
-    private val BG = Color.parseColor("#F4F6FB")
-    private val INK = Color.parseColor("#12203A")
-    private val MUTED = Color.parseColor("#6B7690")
-    private val LINE = Color.parseColor("#E3E8F2")
-    private val PRIMARY = Color.parseColor("#1F4FD8")
-    private val OK = Color.parseColor("#12A150")
+    private val BG = Color.WHITE
+    private val INK = Color.parseColor("#0E1B2C")
+    private val MUTED = Color.parseColor("#667085")
+    private val LINE = Color.parseColor("#E6E9EE")
+    private val PRIMARY = Color.parseColor("#0E1B2C")
+    private val OK = Color.parseColor("#0A7D55")
+    private val AMBER = Color.parseColor("#B26A00")
+    private val RED = Color.parseColor("#B42318")
 
     private lateinit var statusDot: View
     private lateinit var statusText: TextView
@@ -31,7 +41,17 @@ class MainActivity : Activity() {
     private lateinit var settingsPage: ScrollView
     private lateinit var tabHist: TextView
     private lateinit var tabSet: TextView
+    private lateinit var indHist: View
+    private lateinit var indSet: View
     private val fields = LinkedHashMap<String, EditText>()
+    private val handler = Handler(Looper.getMainLooper())
+    private var lastSig = ""
+    private val ticker = object : Runnable {
+        override fun run() {
+            render()
+            handler.postDelayed(this, 3000)
+        }
+    }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -45,7 +65,8 @@ class MainActivity : Activity() {
         text = t
         setTextSize(TypedValue.COMPLEX_UNIT_SP, sp)
         setTextColor(color)
-        if (bold) setTypeface(typeface, Typeface.BOLD)
+        fontFeatureSettings = "tnum"
+        if (bold) typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
     }
 
     private fun lp(top: Int = 0, w: Int = ViewGroup.LayoutParams.MATCH_PARENT) =
@@ -53,22 +74,31 @@ class MainActivity : Activity() {
 
     private fun card() = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(14), dp(12), dp(14), dp(12))
-        background = rounded(Color.WHITE, 16, LINE)
+        setPadding(0, 0, 0, dp(16))
+        addView(View(this@MainActivity).apply { setBackgroundColor(LINE) },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)).apply { bottomMargin = dp(16) })
     }
 
-    private fun chip(label: String, color: Int) = tv(label, 11f, Color.WHITE, true).apply {
-        setPadding(dp(10), dp(3), dp(10), dp(3))
-        background = rounded(color, 20)
+    private fun wallet(label: String, color: Int) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        addView(View(this@MainActivity).apply { background = rounded(color, 2) }, LinearLayout.LayoutParams(dp(8), dp(8)))
+        addView(tv(label, 13f, INK, true).apply { setPadding(dp(8), 0, 0, 0) })
     }
+
+    private fun status(label: String, color: Int) = tv("\u25CF  $label", 13f, color, true)
 
     private fun button(label: String, color: Int, textColor: Int = Color.WHITE, onClick: () -> Unit) =
         Button(this).apply {
             text = label
-            isAllCaps = false
+            transformationMethod = null
+            stateListAnimator = null
+            minHeight = dp(48)
+            minimumHeight = dp(48)
             setTextColor(textColor)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            background = rounded(color, 12, if (color == Color.WHITE) LINE else null)
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            background = rounded(color, 6, if (color == Color.WHITE) LINE else null)
             setOnClickListener { onClick() }
         }
 
@@ -82,8 +112,6 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun rupiah(n: Long) = "Rp " + String.format("%,d", n).replace(',', '.')
-
     private fun listenerOn(): Boolean {
         val flat = Settings.Secure.getString(contentResolver, "enabled_notification_listeners") ?: return false
         return flat.contains(packageName)
@@ -91,9 +119,21 @@ class MainActivity : Activity() {
 
     private fun openAccess() = startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
 
+    private fun copy(t: String) {
+        (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+            .setPrimaryClip(ClipData.newPlainText("invoice", t))
+        Toast.makeText(this, "Disalin: $t", Toast.LENGTH_SHORT).show()
+    }
+
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
-        window.statusBarColor = Color.parseColor("#14307F")
+        window.statusBarColor = Color.WHITE
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+        }
         val p = Cfg.prefs(this)
 
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(BG) }
@@ -101,58 +141,55 @@ class MainActivity : Activity() {
         // ---- header ----
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(18), dp(20), dp(18))
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TL_BR,
-                intArrayOf(Color.parseColor("#14307F"), Color.parseColor("#1F4FD8"))
-            )
+            setPadding(dp(20), dp(16), dp(20), dp(14))
         }
-        header.addView(tv("NotifApp", 24f, Color.WHITE, true))
-        header.addView(tv("Pemantau pembayaran QRIS", 13f, Color.parseColor("#C7D4FF")))
+        header.addView(tv("NotifApp", 20f, INK, true))
         val statusRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(8), dp(12), dp(8))
-            background = rounded(Color.parseColor("#26FFFFFF"), 20)
             setOnClickListener { openAccess() }
         }
         statusDot = View(this).apply { background = rounded(Color.GRAY, 10) }
-        statusRow.addView(statusDot, LinearLayout.LayoutParams(dp(10), dp(10)))
-        statusText = tv("", 13f, Color.WHITE, true).apply { setPadding(dp(8), 0, 0, 0) }
+        statusRow.addView(statusDot, LinearLayout.LayoutParams(dp(8), dp(8)))
+        statusText = tv("", 13f, MUTED).apply { setPadding(dp(8), 0, 0, 0) }
         statusRow.addView(statusText)
-        header.addView(statusRow, lp(14, ViewGroup.LayoutParams.WRAP_CONTENT))
+        header.addView(statusRow, lp(6, ViewGroup.LayoutParams.WRAP_CONTENT))
         root.addView(header, lp())
 
         // ---- tabs ----
         val tabs = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(16), dp(12), dp(16), dp(4))
+            setPadding(dp(20), 0, dp(20), 0)
         }
-        fun tab(label: String, f: () -> Unit) = TextView(this).apply {
-            text = label
-            gravity = Gravity.CENTER
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            setTypeface(typeface, Typeface.BOLD)
-            setPadding(dp(18), dp(8), dp(18), dp(8))
-            setOnClickListener { f() }
+        fun tab(label: String, f: () -> Unit, bind: (TextView, View) -> Unit): LinearLayout {
+            val t = tv(label, 14f, MUTED, true).apply { setPadding(0, dp(10), 0, dp(10)) }
+            val ind = View(this)
+            bind(t, ind)
+            return LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setOnClickListener { f() }
+                addView(t)
+                addView(ind, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(2)))
+            }
         }
-        tabHist = tab("Riwayat") { selectTab(0) }
-        tabSet = tab("Pengaturan") { selectTab(1) }
-        tabs.addView(tabHist)
-        tabs.addView(tabSet, lp(0, ViewGroup.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(8) })
+        tabs.addView(tab("Riwayat", { selectTab(0) }) { t, v -> tabHist = t; indHist = v })
+        tabs.addView(tab("Pengaturan", { selectTab(1) }) { t, v -> tabSet = t; indSet = v },
+            lp(0, ViewGroup.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(24) })
         root.addView(tabs, lp())
+        root.addView(View(this).apply { setBackgroundColor(LINE) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
 
         // ---- halaman riwayat ----
         listBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(8), dp(16), dp(24))
+            setPadding(dp(20), dp(4), dp(20), dp(24))
         }
         val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        actions.addView(button("Refresh", Color.WHITE, INK) { render() }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        actions.addView(button("Hapus riwayat", Color.WHITE, Color.parseColor("#D92D20")) {
-            p.edit().remove("h").apply(); render()
+        actions.addView(button("Refresh", Color.WHITE, INK) { lastSig = ""; render() },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        actions.addView(button("Hapus riwayat", Color.WHITE, RED) {
+            p.edit().remove("h").apply(); lastSig = ""; render()
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(8) })
-        val histWrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(8), dp(16), 0) }
+        val histWrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(12), dp(20), 0) }
         histWrap.addView(actions, lp())
         val histRoot = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         histRoot.addView(histWrap, lp())
@@ -160,21 +197,21 @@ class MainActivity : Activity() {
         historyPage = ScrollView(this).apply { addView(histRoot) }
 
         // ---- halaman pengaturan ----
-        fun field(box: LinearLayout, label: String, key: String, def: String = "", pw: Boolean = false) {
-            box.addView(tv(label, 12f, MUTED, true), lp(10))
+        fun field(box: LinearLayout, label: String, key: String, pw: Boolean = false) {
+            box.addView(tv(label, 12f, MUTED), lp(12))
             val e = EditText(this).apply {
-                setText(p.getString(key, def))
+                setText(p.getString(key, ""))
                 setTextColor(INK)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                 setSingleLine()
                 if (pw) inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
                 setPadding(dp(12), dp(10), dp(12), dp(10))
-                background = rounded(Color.parseColor("#F8FAFD"), 10, LINE)
+                background = rounded(Color.WHITE, 6, LINE)
             }
             fields[key] = e
             box.addView(e, lp(4))
         }
-        val setBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(8), dp(16), dp(32)) }
+        val setBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), dp(32)) }
 
         val c1 = card()
         c1.addView(tv("Izin notifikasi", 15f, INK, true))
@@ -193,27 +230,23 @@ class MainActivity : Activity() {
                 try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(u.scheme + "://" + u.authority + "/"))) } catch (_: Exception) {}
             } else Toast.makeText(this, "Isi URL webhook dulu", Toast.LENGTH_SHORT).show()
         }, lp(12))
-        setBox.addView(c2, lp(12))
+        setBox.addView(c2, lp())
 
         val c3 = card()
         c3.addView(tv("Telegram (opsional)", 15f, INK, true))
         field(c3, "Bot token", "tok", pw = true)
         field(c3, "Chat ID", "chat")
-        setBox.addView(c3, lp(12))
+        setBox.addView(c3, lp())
 
         val c4 = card()
-        c4.addView(tv("Package dipantau", 15f, INK, true))
-        c4.addView(tv("Pisah koma. Tanda * di akhir = semua package berawalan itu.", 12f, MUTED), lp(4))
-        field(c4, "Daftar package", "pkgs2", Cfg.DEFAULT_PKGS)
-        setBox.addView(c4, lp(12))
+        c4.addView(tv("Package tambahan", 15f, INK, true))
+        c4.addView(tv("Bawaan sudah mencakup WhatsApp, Gojek/GoPay, Shopee/ShopeePay, dan DANA. Tambahkan di sini (pisah koma, * di akhir = semua berawalan itu) kalau ada notifikasi yang belum terbaca. Package asli terlihat di riwayat.", 12f, MUTED), lp(4))
+        field(c4, "Package", "pkgsx")
+        setBox.addView(c4, lp())
 
         setBox.addView(button("Simpan", PRIMARY) {
             val e = p.edit()
-            for ((k, v) in fields) {
-                var t = v.text.toString().trim()
-                if (k == "pkgs2" && t.isEmpty()) t = Cfg.DEFAULT_PKGS
-                e.putString(k, t)
-            }
+            for ((k, v) in fields) e.putString(k, v.text.toString().trim())
             e.apply()
             Toast.makeText(this, "Tersimpan", Toast.LENGTH_SHORT).show()
         }, lp(16))
@@ -228,24 +261,37 @@ class MainActivity : Activity() {
     private fun selectTab(i: Int) {
         historyPage.visibility = if (i == 0) View.VISIBLE else View.GONE
         settingsPage.visibility = if (i == 1) View.VISIBLE else View.GONE
-        fun style(t: TextView, on: Boolean) {
-            t.setTextColor(if (on) Color.WHITE else MUTED)
-            t.background = rounded(if (on) PRIMARY else Color.TRANSPARENT, 20)
-        }
-        style(tabHist, i == 0)
-        style(tabSet, i == 1)
+        tabHist.setTextColor(if (i == 0) INK else MUTED)
+        tabSet.setTextColor(if (i == 1) INK else MUTED)
+        indHist.setBackgroundColor(if (i == 0) INK else Color.TRANSPARENT)
+        indSet.setBackgroundColor(if (i == 1) INK else Color.TRANSPARENT)
     }
 
-    override fun onResume() { super.onResume(); render() }
+    override fun onResume() {
+        super.onResume()
+        lastSig = ""
+        ticker.run()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        handler.removeCallbacks(ticker)
+    }
 
     private fun render() {
         val on = listenerOn()
+        val raw = Cfg.prefs(this).getString("h", "[]") ?: "[]"
+        val sig = raw + on
+        if (sig == lastSig) return
+        lastSig = sig
+
         statusText.text = if (on) "Listener aktif" else "Belum aktif, ketuk untuk mengaktifkan"
         (statusDot.background as GradientDrawable).setColor(
-            if (on) Color.parseColor("#4ADE80") else Color.parseColor("#F87171")
+            if (on) OK else RED
         )
+        statusText.setTextColor(if (on) MUTED else RED)
         listBox.removeAllViews()
-        val arr = JSONArray(Cfg.prefs(this).getString("h", "[]"))
+        val arr = JSONArray(raw)
         if (arr.length() == 0) {
             listBox.addView(tv("Belum ada notifikasi.", 14f, MUTED).apply {
                 gravity = Gravity.CENTER
@@ -258,20 +304,52 @@ class MainActivity : Activity() {
             val pkg = o.optString("p", o.optString("a", "?"))
             val title = o.optString("ti")
             val text = o.optString("tx")
+            val st = o.optString("st")
+            val inv = o.optString("inv")
+            val info = o.optString("info")
             val (label, color) = walletOf(pkg, title, text)
-            val amount = if (pkg.startsWith("com.whatsapp")) null else parseAmount(title, text)
+            val amount: Long? =
+                if (o.has("am")) o.optLong("am")
+                else if (pkg.startsWith("com.whatsapp")) null
+                else parseAmount(title, text)
+            val stChip: Pair<String, Int>? = when (st) {
+                "paid" -> Pair("Lunas", OK)
+                "nomatch" -> Pair("Tidak cocok", AMBER)
+                "fail" -> Pair("Gagal kirim", RED)
+                "sending" -> Pair("Mengirim", MUTED)
+                "unmon" -> Pair("Belum dipantau", AMBER)
+                else -> null
+            }
 
             val c = card()
             val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-            top.addView(chip(label, color))
+            top.addView(wallet(label, color))
             top.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-            top.addView(tv(o.optString("t"), 11f, MUTED))
+            top.addView(tv(o.optString("t"), 12f, MUTED))
             c.addView(top, lp())
-            if (amount != null) c.addView(tv("+ " + rupiah(amount), 18f, OK, true), lp(8))
-            if (title.isNotEmpty()) c.addView(tv(title, 14f, INK, true), lp(if (amount != null) 2 else 8))
+            if (amount != null) {
+                val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                line.addView(tv(rupiah(amount), 24f, if (st == "paid") OK else INK, true))
+                line.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+                if (stChip != null) line.addView(status(stChip.first, stChip.second))
+                c.addView(line, lp(6))
+            } else if (stChip != null) {
+                c.addView(status(stChip.first, stChip.second), lp(6))
+            }
+            if (inv.isNotEmpty()) {
+                c.addView(tv("Invoice  $inv", 13f, INK, true).apply { setOnClickListener { copy(inv) } }, lp(4))
+            }
+            if (info.isNotEmpty()) c.addView(tv(info, 12f, MUTED), lp(2))
+            if (title.isNotEmpty()) c.addView(tv(title, 14f, INK, true), lp(8))
             if (text.isNotEmpty()) c.addView(tv(text, 13f, MUTED), lp(2))
-            c.addView(tv(pkg, 10f, Color.parseColor("#A3ACBF")), lp(6))
-            listBox.addView(c, lp(if (i == 0) 0 else 10))
+            c.addView(tv(pkg, 11f, Color.parseColor("#98A2B3")), lp(6))
+            if (st == "unmon") {
+                c.addView(button("Pantau package ini", PRIMARY) {
+                    Cfg.addPackage(this@MainActivity, pkg)
+                    Toast.makeText(this@MainActivity, "Dipantau: $pkg. Bayar lagi untuk mencoba.", Toast.LENGTH_LONG).show()
+                }, lp(10))
+            }
+            listBox.addView(c, lp())
         }
     }
 }
