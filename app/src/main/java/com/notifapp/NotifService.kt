@@ -15,12 +15,28 @@ import java.util.Locale
 
 object Cfg {
     // Daftar package bisa diubah di app (kolom "Package dipantau"). Cek package asli di riwayat.
-    const val DEFAULT_PKGS =
-        "com.whatsapp,com.whatsapp.w4b,com.gojek.app,com.gojek.gopaymerchant,com.shopee.id,id.dana"
+    // Tanda * di akhir = cocok semua package berawalan itu (mis. id.dana* untuk DANA/DANA Bisnis)
+    const val DEFAULT_PKGS = "com.whatsapp,com.whatsapp.w4b,com.gojek*,com.shopee.id,id.dana*"
     fun prefs(c: Context) = c.getSharedPreferences("n", Context.MODE_PRIVATE)
-    fun pkgs(c: Context): Set<String> =
-        (prefs(c).getString("pkgs", DEFAULT_PKGS) ?: DEFAULT_PKGS)
-            .split(",").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+    fun pkgs(c: Context): List<String> =
+        (prefs(c).getString("pkgs2", DEFAULT_PKGS) ?: DEFAULT_PKGS)
+            .split(",").map { it.trim() }.filter { it.isNotEmpty() }
+    fun monitored(c: Context, pkg: String): Boolean =
+        pkgs(c).any { if (it.endsWith("*")) pkg.startsWith(it.dropLast(1)) else pkg == it }
+}
+
+// dana | shopeepay | gopay (null kalau tidak dikenali). Dipakai server untuk mencocokkan order per metode.
+fun detectMethod(pkg: String, title: String, text: String): String? {
+    val s = "$title $text"
+    return when {
+        pkg == "com.shopee.id" -> "shopeepay"
+        pkg.startsWith("com.gojek") -> "gopay"
+        pkg.startsWith("id.dana") -> "dana"
+        s.contains("DANA", true) -> "dana"
+        s.contains("QRIS statis", true) -> "gopay"
+        s.contains("Pembayaran sebesar", true) -> "shopeepay"
+        else -> null
+    }
 }
 
 // Hanya notifikasi PEMBAYARAN MASUK. Notif "kamu barusan bayar" (keluar) diabaikan.
@@ -37,7 +53,7 @@ class NotifService : NotificationListenerService() {
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         val pkg = sbn.packageName
-        if (pkg !in Cfg.pkgs(this)) return
+        if (!Cfg.monitored(this, pkg)) return
         val e = sbn.notification.extras
         val title = e.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
         val text = e.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
@@ -63,16 +79,16 @@ class NotifService : NotificationListenerService() {
 
         sendTelegram("[$pkg] $title\n$text")
         if (!pkg.startsWith("com.whatsapp")) {
-            parseAmount(title, text)?.let { sendWebhook(it, pkg, title, text, now) }
+            parseAmount(title, text)?.let { sendWebhook(it, detectMethod(pkg, title, text) ?: "", pkg, title, text, now) }
         }
     }
 
-    private fun sendWebhook(amount: Long, pkg: String, title: String, text: String, ts: Long) {
+    private fun sendWebhook(amount: Long, method: String, pkg: String, title: String, text: String, ts: Long) {
         val p = Cfg.prefs(this)
         val url = p.getString("wh", "") ?: ""
         val secret = p.getString("sec", "") ?: ""
         if (url.isBlank()) return
-        val body = JSONObject().put("amount", amount).put("source", pkg)
+        val body = JSONObject().put("amount", amount).put("method", method).put("source", pkg)
             .put("title", title).put("text", text).put("ts", ts).toString()
         Thread {
             for (i in 1..3) {
