@@ -6,7 +6,7 @@
         android:usesCleartextTraffic="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
-        android:label="NotifApp"
+        android:label="Emy Cash"
         android:allowBackup="false"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <activity android:name=".MainActivity" android:exported="true">
@@ -18,7 +18,7 @@
         <service
             android:name=".NotifService"
             android:exported="true"
-            android:label="NotifApp Listener"
+            android:label="Emy Cash Listener"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />
