@@ -14,33 +14,84 @@ import java.util.Date
 import java.util.Locale
 
 object Cfg {
-    // Verifikasi package name di HP kamu kalau ada yang tidak masuk
-    val APPS = mapOf(
-        "com.whatsapp" to "WhatsApp",
-        "com.whatsapp.w4b" to "WA Business",
-        "com.gojek.app" to "GoPay",
-        "com.gojek.gopaymerchant" to "GoPay Merchant",
-        "com.shopee.id" to "ShopeePay"
-    )
+    // Daftar package bisa diubah di app (kolom "Package dipantau"). Cek package asli di riwayat.
+    const val DEFAULT_PKGS =
+        "com.whatsapp,com.whatsapp.w4b,com.gojek.app,com.gojek.gopaymerchant,com.shopee.id,id.dana"
     fun prefs(c: Context) = c.getSharedPreferences("n", Context.MODE_PRIVATE)
+    fun pkgs(c: Context): Set<String> =
+        (prefs(c).getString("pkgs", DEFAULT_PKGS) ?: DEFAULT_PKGS)
+            .split(",").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+}
+
+// Hanya notifikasi PEMBAYARAN MASUK. Notif "kamu barusan bayar" (keluar) diabaikan.
+fun parseAmount(title: String, text: String): Long? {
+    val s = "$title $text"
+    if (!Regex("(?i)diterima|masuk").containsMatchIn(s)) return null
+    if (Regex("(?i)barusan bayar|berhasil bayar").containsMatchIn(s)) return null
+    val m = Regex("(?i)Rp\\s?([0-9][0-9.]*)(?:,[0-9]{1,2})?").find(s) ?: return null
+    return m.groupValues[1].replace(".", "").toLongOrNull()
 }
 
 class NotifService : NotificationListenerService() {
+    private val seen = HashMap<String, Long>()
+
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        val app = Cfg.APPS[sbn.packageName] ?: return
+        val pkg = sbn.packageName
+        if (pkg !in Cfg.pkgs(this)) return
         val e = sbn.notification.extras
         val title = e.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
         val text = e.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
             ?: e.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
         if (title.isEmpty() && text.isEmpty()) return
-        val time = SimpleDateFormat("dd/MM HH:mm:ss", Locale.getDefault()).format(Date())
+
+        val now = System.currentTimeMillis()
+        val sig = pkg + title + text
+        synchronized(seen) {
+            val last = seen[sig]
+            if (last != null && now - last < 15000) return
+            seen[sig] = now
+            seen.entries.removeAll { now - it.value > 120000 }
+        }
+
+        val time = SimpleDateFormat("dd/MM HH:mm:ss", Locale.getDefault()).format(Date(now))
         val p = Cfg.prefs(this)
         val arr = JSONArray(p.getString("h", "[]"))
         val list = ArrayList<JSONObject>()
-        list.add(JSONObject().put("t", time).put("a", app).put("ti", title).put("tx", text))
+        list.add(JSONObject().put("t", time).put("p", pkg).put("ti", title).put("tx", text))
         for (i in 0 until minOf(arr.length(), 299)) list.add(arr.getJSONObject(i))
         p.edit().putString("h", JSONArray(list).toString()).apply()
-        sendTelegram("[$app] $title\n$text")
+
+        sendTelegram("[$pkg] $title\n$text")
+        if (!pkg.startsWith("com.whatsapp")) {
+            parseAmount(title, text)?.let { sendWebhook(it, pkg, title, text, now) }
+        }
+    }
+
+    private fun sendWebhook(amount: Long, pkg: String, title: String, text: String, ts: Long) {
+        val p = Cfg.prefs(this)
+        val url = p.getString("wh", "") ?: ""
+        val secret = p.getString("sec", "") ?: ""
+        if (url.isBlank()) return
+        val body = JSONObject().put("amount", amount).put("source", pkg)
+            .put("title", title).put("text", text).put("ts", ts).toString()
+        Thread {
+            for (i in 1..3) {
+                try {
+                    val c = URL(url).openConnection() as HttpURLConnection
+                    c.requestMethod = "POST"
+                    c.doOutput = true
+                    c.connectTimeout = 8000
+                    c.readTimeout = 8000
+                    c.setRequestProperty("Content-Type", "application/json")
+                    c.setRequestProperty("X-Secret", secret)
+                    c.outputStream.use { it.write(body.toByteArray()) }
+                    val code = c.responseCode
+                    c.disconnect()
+                    if (code in 200..299) break
+                } catch (_: Exception) {}
+                try { Thread.sleep(3000L * i) } catch (_: Exception) {}
+            }
+        }.start()
     }
 
     private fun sendTelegram(msg: String) {
@@ -50,8 +101,7 @@ class NotifService : NotificationListenerService() {
         if (token.isBlank() || chat.isBlank()) return
         Thread {
             try {
-                val u = URL("https://api.telegram.org/bot$token/sendMessage")
-                val c = u.openConnection() as HttpURLConnection
+                val c = URL("https://api.telegram.org/bot$token/sendMessage").openConnection() as HttpURLConnection
                 c.requestMethod = "POST"
                 c.doOutput = true
                 c.connectTimeout = 10000
